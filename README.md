@@ -25,14 +25,6 @@
 16. [RAG Systems](#16-rag-systems)
 17. [Tools & Toolkits](#17-tools--toolkits)
 18. [Agents](#18-agents)
-19. [LangGraph](#19-langgraph)
-20. [Multi-Agent Systems](#20-multi-agent-systems)
-21. [Callbacks & Observability](#21-callbacks--observability)
-22. [LangSmith](#22-langsmith)
-23. [Production Patterns](#23-production-patterns)
-24. [Evaluation](#24-evaluation)
-25. [Common Failure Modes & Debugging](#25-common-failure-modes--debugging)
-
 ---
 
 # 1. What is LangChain & Why It Exists
@@ -2765,4 +2757,532 @@ Context:
             "history": history or []
         }):
             yield token
+```
+---
+
+# 17. Tools & Toolkits
+
+## 17.1 What are Tools?
+
+Tools are **functions that agents can call** to interact with the world. They let an LLM do things it can't do alone:
+
+```
+Without Tools:  LLM can only generate text
+With Tools:     LLM can search the web, run code, query databases,
+                send emails, call APIs, read files, and more
+```
+
+A Tool has:
+- **name**: Identifier the LLM uses to call it
+- **description**: What the tool does (LLM reads this to decide when to use it)
+- **function**: The actual Python code that runs
+- **args_schema**: Pydantic schema defining expected arguments
+
+## 17.2 Creating Tools
+
+### Method 1: @tool decorator (Simplest)
+```python
+from langchain_core.tools import tool
+
+@tool
+def add_numbers(a: int, b: int) -> int:
+    """Add two numbers together. Use when you need to perform addition."""
+    return a + b
+
+@tool
+def get_word_length(word: str) -> int:
+    """Returns the number of characters in a word."""
+    return len(word)
+
+# Inspect the tool
+print(add_numbers.name)         # "add_numbers"
+print(add_numbers.description)  # "Add two numbers together..."
+print(add_numbers.args)         # {"a": {"type": "integer"}, "b": {"type": "integer"}}
+
+# Call directly
+result = add_numbers.invoke({"a": 5, "b": 3})
+print(result)  # 8
+```
+
+### Method 2: StructuredTool with Pydantic Schema
+```python
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, Field
+
+class SearchInput(BaseModel):
+    query: str = Field(description="The search query to look up")
+    num_results: int = Field(default=5, description="Number of results to return")
+
+def web_search(query: str, num_results: int = 5) -> str:
+    """Searches the web and returns results."""
+    # Real implementation would call a search API
+    return f"Search results for '{query}': [result1, result2, ...]"
+
+search_tool = StructuredTool.from_function(
+    func=web_search,
+    name="web_search",
+    description="Search the internet for current information",
+    args_schema=SearchInput,
+    return_direct=False,  # If True, return tool output directly to user
+)
+```
+
+### Method 3: BaseTool class (Most Flexible)
+```python
+from langchain_core.tools import BaseTool
+from pydantic import BaseModel, Field
+from typing import Optional, Type
+import requests
+
+class WeatherInput(BaseModel):
+    city: str = Field(description="The city name to get weather for")
+    units: str = Field(default="metric", description="celsius or fahrenheit")
+
+class WeatherTool(BaseTool):
+    name: str = "get_weather"
+    description: str = "Get current weather for a city. Use when asked about weather."
+    args_schema: Type[BaseModel] = WeatherInput
+    
+    def _run(self, city: str, units: str = "metric") -> str:
+        """Synchronous execution"""
+        # Call weather API
+        api_key = os.getenv("WEATHER_API_KEY")
+        url = f"https://api.openweathermap.org/data/2.5/weather"
+        params = {"q": city, "appid": api_key, "units": units}
+        
+        try:
+            resp = requests.get(url, params=params)
+            data = resp.json()
+            temp = data["main"]["temp"]
+            desc = data["weather"][0]["description"]
+            return f"Weather in {city}: {temp}°, {desc}"
+        except Exception as e:
+            return f"Error getting weather: {str(e)}"
+    
+    async def _arun(self, city: str, units: str = "metric") -> str:
+        """Async execution"""
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            # async implementation
+            pass
+
+weather_tool = WeatherTool()
+result = weather_tool.invoke({"city": "London", "units": "metric"})
+```
+
+## 17.3 Built-in Tools
+
+```python
+# DuckDuckGo Search (free, no API key)
+from langchain_community.tools import DuckDuckGoSearchRun
+search = DuckDuckGoSearchRun()
+result = search.invoke("Latest AI news 2024")
+
+# Wikipedia
+from langchain_community.tools import WikipediaQueryRun
+from langchain_community.utilities import WikipediaAPIWrapper
+wiki = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
+result = wiki.invoke("Albert Einstein")
+
+# Python REPL (execute Python code)
+from langchain_experimental.tools import PythonREPLTool
+python_repl = PythonREPLTool()
+result = python_repl.invoke("print(2 ** 10)")  # "1024"
+
+# Shell (run bash commands) — USE WITH CAUTION!
+from langchain_community.tools import ShellTool
+shell = ShellTool()
+result = shell.invoke({"commands": ["ls -la", "echo hello"]})
+
+# Tavily Search (best search tool, needs API key)
+from langchain_community.tools.tavily_search import TavilySearchResults
+search = TavilySearchResults(max_results=3)
+result = search.invoke("current OpenAI CEO")
+
+# ArXiv (research papers)
+from langchain_community.tools import ArxivQueryRun
+arxiv = ArxivQueryRun()
+result = arxiv.invoke("transformer architecture attention mechanism")
+```
+
+## 17.4 File Tools
+
+```python
+from langchain_community.tools.file_management import (
+    ReadFileTool,
+    WriteFileTool,
+    ListDirectoryTool,
+    CopyFileTool,
+    DeleteFileTool,
+    MoveFileTool,
+)
+from langchain_community.agent_toolkits import FileManagementToolkit
+
+# Create a toolkit (restricted to a directory for safety)
+toolkit = FileManagementToolkit(root_dir="/tmp/agent_workspace")
+tools = toolkit.get_tools()
+# Returns: [ReadFileTool, WriteFileTool, ListDirectoryTool, ...]
+
+# Use individually
+read_tool = ReadFileTool(root_dir="/tmp/agent_workspace")
+content = read_tool.invoke({"file_path": "notes.txt"})
+
+write_tool = WriteFileTool(root_dir="/tmp/agent_workspace")
+write_tool.invoke({"file_path": "output.txt", "text": "Hello from agent!"})
+```
+
+## 17.5 Database Tools
+
+```python
+from langchain_community.utilities import SQLDatabase
+from langchain_community.tools.sql_database.tool import (
+    QuerySQLDataBaseTool,
+    InfoSQLDatabaseTool,
+    ListSQLDatabaseTool,
+)
+
+db = SQLDatabase.from_uri("sqlite:///mydatabase.db")
+
+# Tools to give an agent SQL access
+query_tool = QuerySQLDataBaseTool(db=db)
+info_tool = InfoSQLDatabaseTool(db=db)
+list_tool = ListSQLDatabaseTool(db=db)
+
+# List all tables
+tables = list_tool.invoke("")
+# Get info about a table
+info = info_tool.invoke("users")
+# Run a query
+result = query_tool.invoke("SELECT COUNT(*) FROM users")
+```
+
+## 17.6 Toolkits
+
+A Toolkit is a pre-packaged collection of related tools:
+
+```python
+# GitHub Toolkit
+from langchain_community.agent_toolkits.github.toolkit import GitHubToolkit
+from langchain_community.utilities.github import GitHubAPIWrapper
+
+github = GitHubAPIWrapper()
+toolkit = GitHubToolkit.from_github_api_wrapper(github)
+tools = toolkit.get_tools()
+# read_file, create_file, update_file, list_open_pull_requests, etc.
+
+# Pandas DataFrame Toolkit
+from langchain_experimental.agents import create_pandas_dataframe_agent
+import pandas as pd
+
+df = pd.read_csv("sales_data.csv")
+agent = create_pandas_dataframe_agent(
+    ChatOpenAI(temperature=0),
+    df,
+    verbose=True,
+    allow_dangerous_code=True
+)
+agent.invoke("What is the average revenue by region?")
+
+# SQL Database Toolkit
+from langchain_community.agent_toolkits import SQLDatabaseToolkit
+
+toolkit = SQLDatabaseToolkit(db=db, llm=ChatOpenAI())
+tools = toolkit.get_tools()  # query, schema info, table list tools
+```
+
+## 17.7 Tool Error Handling
+
+```python
+from langchain_core.tools import tool, ToolException
+
+@tool
+def divide(numerator: float, denominator: float) -> float:
+    """Divide two numbers. Raises error if denominator is zero."""
+    if denominator == 0:
+        raise ToolException("Cannot divide by zero!")
+    return numerator / denominator
+
+# Tool with handle_tool_error
+from langchain_core.tools import StructuredTool
+
+safe_divide = StructuredTool.from_function(
+    func=divide.func,
+    name="divide",
+    description="Divide two numbers",
+    handle_tool_error=True,  # Catches ToolException, passes message to agent
+)
+
+# Custom error handling
+safe_divide = StructuredTool.from_function(
+    func=divide.func,
+    name="divide",
+    description="Divide two numbers",
+    handle_tool_error=lambda e: f"Tool failed: {str(e)}. Try different inputs.",
+)
+```
+
+---
+
+# 18. Agents
+
+## 18.1 What is an Agent?
+
+An Agent is a system where the **LLM decides which actions to take** in a loop:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    AGENT LOOP                            │
+│                                                          │
+│  Input ──→ LLM ──→ "I need to search the web"           │
+│               ↓                                          │
+│         Tool Call: search("latest AI news")              │
+│               ↓                                          │
+│         Tool Result: "OpenAI released..."                │
+│               ↓                                          │
+│         LLM ──→ "I need more info about OpenAI"          │
+│               ↓                                          │
+│         Tool Call: search("OpenAI company info")         │
+│               ↓                                          │
+│         Tool Result: "OpenAI is..."                      │
+│               ↓                                          │
+│         LLM ──→ "I have enough to answer" → Final Answer  │
+└─────────────────────────────────────────────────────────┘
+```
+
+## 18.2 ReAct Agent (Most Common)
+
+ReAct = **Re**ason + **Act**. The model reasons, then acts, then observes, repeat.
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_community.tools import DuckDuckGoSearchRun, WikipediaQueryRun
+from langchain_community.utilities import WikipediaAPIWrapper
+from langchain import hub
+from langchain.agents import create_react_agent, AgentExecutor
+
+# Initialize tools
+search = DuckDuckGoSearchRun()
+wiki = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
+tools = [search, wiki]
+
+# Get the ReAct prompt from LangChain hub
+# (or create your own — see below)
+prompt = hub.pull("hwchase17/react")
+
+# Create agent (the LLM + prompt + tools)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+agent = create_react_agent(llm, tools, prompt)
+
+# Create executor (runs the agent loop)
+agent_executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    verbose=True,           # Print reasoning steps
+    max_iterations=10,      # Max loops before stopping
+    handle_parsing_errors=True,  # Handle LLM format errors gracefully
+)
+
+# Run the agent
+result = agent_executor.invoke({
+    "input": "Who is the current CEO of Anthropic, and what did they study at university?"
+})
+print(result["output"])
+```
+
+**What verbose output looks like:**
+```
+> Entering new AgentExecutor chain...
+Thought: I need to find out who the CEO of Anthropic is.
+Action: duckduckgo_search
+Action Input: Anthropic CEO 2024
+Observation: Dario Amodei is the CEO of Anthropic...
+Thought: Now I need to find what Dario studied at university.
+Action: wikipedia
+Action Input: Dario Amodei
+Observation: Dario Amodei studied physics at Caltech...
+Thought: I have all the information needed.
+Final Answer: Dario Amodei is the CEO of Anthropic. He studied physics at Caltech...
+```
+
+## 18.3 Tool-Calling Agent (Modern, Recommended)
+
+Uses native function/tool calling built into modern LLMs:
+
+```python
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import tool
+
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate a mathematical expression. Input should be a valid Python math expression."""
+    try:
+        result = eval(expression, {"__builtins__": {}}, 
+                     {"abs": abs, "round": round, "min": min, "max": max})
+        return str(result)
+    except Exception as e:
+        return f"Error: {e}"
+
+@tool  
+def get_current_date() -> str:
+    """Get today's date."""
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")
+
+tools = [calculator, get_current_date, DuckDuckGoSearchRun()]
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful assistant. Use tools when needed."),
+    MessagesPlaceholder("chat_history", optional=True),
+    ("human", "{input}"),
+    MessagesPlaceholder("agent_scratchpad"),  # Required: where tool results go
+])
+
+agent = create_tool_calling_agent(llm, tools, prompt)
+executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+result = executor.invoke({"input": "What is 15% of 3847, and what's today's date?"})
+print(result["output"])
+```
+
+## 18.4 Agent with Memory
+
+```python
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+
+store = {}
+
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    if session_id not in store:
+        store[session_id] = ChatMessageHistory()
+    return store[session_id]
+
+agent_with_memory = RunnableWithMessageHistory(
+    executor,
+    get_session_history,
+    input_messages_key="input",
+    history_messages_key="chat_history",
+)
+
+config = {"configurable": {"session_id": "user_42"}}
+
+r1 = agent_with_memory.invoke(
+    {"input": "My name is Alice and I'm a data scientist."},
+    config=config
+)
+
+r2 = agent_with_memory.invoke(
+    {"input": "What's my name and profession?"},
+    config=config
+)
+print(r2["output"])  # "Your name is Alice and you're a data scientist."
+```
+
+## 18.5 Streaming Agent Output
+
+```python
+# Stream token by token
+for event in executor.stream({"input": "What is the capital of France?"}):
+    # Event types: on_chain_start, on_tool_start, on_tool_end, on_chain_end
+    if "output" in event:
+        print(event["output"], end="", flush=True)
+
+# Stream with full event details
+async for event in executor.astream_events(
+    {"input": "Search for the latest AI news"},
+    version="v2"
+):
+    kind = event["event"]
+    if kind == "on_tool_start":
+        print(f"\n🔧 Using tool: {event['name']}")
+    elif kind == "on_tool_end":
+        print(f"✅ Tool result: {event['data']['output'][:100]}...")
+    elif kind == "on_chat_model_stream":
+        print(event["data"]["chunk"].content, end="", flush=True)
+```
+
+## 18.6 Custom Agent from Scratch
+
+```python
+from langchain_core.agents import AgentAction, AgentFinish
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+# Custom prompt with tool descriptions
+SYSTEM_PROMPT = """You are a helpful AI assistant with access to tools.
+
+Available tools:
+{tools}
+
+Tool names: {tool_names}
+
+To use a tool, respond in this format:
+Thought: [your reasoning]
+Action: [tool name]
+Action Input: [tool input]
+
+After getting the tool results, continue reasoning until you have the final answer.
+Then respond:
+Thought: I now have the answer
+Final Answer: [your answer]"""
+
+# Custom output parser
+def parse_output(llm_output: str):
+    if "Final Answer:" in llm_output:
+        return AgentFinish(
+            return_values={"output": llm_output.split("Final Answer:")[-1].strip()},
+            log=llm_output,
+        )
+    
+    # Parse action
+    action_match = re.search(r"Action: (.*?)[\n]", llm_output)
+    input_match = re.search(r"Action Input: (.*?)[\n]", llm_output)
+    
+    if action_match and input_match:
+        action = action_match.group(1).strip()
+        action_input = input_match.group(1).strip()
+        return AgentAction(tool=action, tool_input=action_input, log=llm_output)
+    
+    raise ValueError(f"Could not parse output: {llm_output}")
+```
+
+## 18.7 Agent Best Practices
+
+```python
+# 1. Always set max_iterations to prevent infinite loops
+executor = AgentExecutor(agent=agent, tools=tools, max_iterations=10)
+
+# 2. Set the early stopping method
+executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    early_stopping_method="generate",  # Generate a final answer if max iterations hit
+)
+
+# 3. Return intermediate steps for debugging
+executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    return_intermediate_steps=True,
+)
+result = executor.invoke({"input": "..."})
+for action, observation in result["intermediate_steps"]:
+    print(f"Tool: {action.tool}, Input: {action.tool_input}")
+    print(f"Result: {observation}\n")
+
+# 4. Good tool descriptions are CRITICAL
+@tool
+def search(query: str) -> str:
+    # ❌ Bad description:
+    "Search the web."""
+    
+    # ✅ Good description:
+    """ Search the internet for current, real-time information about any topic.
+    Use this when you need information about recent events, current facts,
+    or anything that requires up-to-date data.
+    Input should be a search query string."""
+    pass
 ```
